@@ -1,0 +1,360 @@
+TRUNCATE TABLE  pre_aggregated.lead_date_level_field_collection_data ;
+INSERT INTO pre_aggregated.lead_date_level_field_collection_data (
+
+drop table pre_aggregated.lead_date_level_field_collection_data;
+
+
+create table pre_aggregated.lead_date_level_field_collection_data as (
+WITH RECURSIVE Calendar_new AS (
+     SELECT DATE_TRUNC('month', CURRENT_DATE)::DATE AS cal_date
+    UNION ALL
+    SELECT (cal_date + INTERVAL '1 day')::date
+    FROM Calendar_new
+    WHERE (cal_date + INTERVAL '1 day')::date <= DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month' - INTERVAL '1 day'
+),
+Calendar_old AS (
+    SELECT DATE '2024-03-01' AS cal_date
+    UNION all
+    SELECT (cal_date + INTERVAL '1 day')::date
+    FROM Calendar_old
+    WHERE (cal_date + INTERVAL '1 day')::date <= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month') + INTERVAL '1 month' - INTERVAL '1 day'
+),
+current_month_field as (
+    SELECT
+        ls.collection_lead_id,
+        ls.lender_name,
+        ls.current_emi_amount,
+        ls.zonal_manager,
+        ls.field_manager,
+        ls.emi_amount_collected,
+        ls.ls_emi_payment_date,
+        ls.referred_to_field,
+        ls.dpd_bucket,
+        ls.emi_cycles,
+        ls.field_executive,
+        ls.modified_on    
+    FROM 
+         raw.collections_ls_data ls
+    where zonal_manager is not null
+),
+current_month AS (
+    SELECT
+        ls.collection_lead_id,
+        ls.lender_name,
+        ls.current_emi_amount,
+        h.zonal_manager,
+        h.field_manager,
+        ls.emi_amount_collected,
+        ls.ls_emi_payment_date,
+        ls.referred_to_field,
+        ls.dpd_bucket,
+        ls.emi_cycles,
+        h.field_executive,
+        ls.modified_on,
+        DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month - 1 day' AS  current_day    
+    FROM 
+         field_hierarchy_temp h
+    LEFT JOIN
+         current_month_field  ls ON substring(h.field_executive FROM '^[0-9]+') = substring(ls.field_executive FROM '^[0-9]+')
+),
+ls_calendar_data AS (
+    SELECT * 
+    FROM Calendar_new c
+    LEFT JOIN current_month cm ON
+    EXTRACT(DAY FROM c.cal_date) <= EXTRACT(DAY FROM cm.current_day) AND EXTRACT(MONTH FROM c.cal_date) >= EXTRACT(MONTH FROM cm.current_day) AND EXTRACT(YEAR FROM c.cal_date) = EXTRACT(YEAR FROM cm.current_day)
+),
+ls_calendar_data_old AS (
+    SELECT * 
+    FROM Calendar_old c
+    LEFT JOIN
+        pre_aggregated.historical_collection_ls_data hopd
+    ON
+        EXTRACT(DAY FROM c.cal_date) <= EXTRACT(DAY FROM hopd.calendar_date)
+        AND EXTRACT(MONTH FROM c.cal_date) = EXTRACT(MONTH FROM hopd.calendar_date)
+        AND EXTRACT(YEAR FROM c.cal_date) = EXTRACT(YEAR FROM hopd.calendar_date)
+),
+LS_DATA AS (
+    SELECT
+        calendar_date,
+        collection_lead_id,
+        to_char(calendar_date, 'YYYYMM') AS calendar_year_month,
+        to_char(calendar_date, 'MM') AS calendar_month,
+        to_char(calendar_date, 'DD') AS calendar_day,
+        zonal_manager,
+        field_manager,
+        field_executive,
+        emi_cycles,
+        current_emi_amount,
+        dpd_bucket,
+        referred_to_field,
+        lender_name,
+        CASE
+            WHEN UPPER(lender_name) IN ('APOLLO', 'FAIRCENT', 'ILOAN', 'LOANTAP') AND ls_payment_date::date = calendar_date::date THEN ls_payment_date::date
+            ELSE null
+        END as ls_payment_date
+    FROM (
+    SELECT 
+        collection_lead_id, 
+        lender_name, 
+        current_emi_amount, 
+        zonal_manager, 
+        field_manager, 
+        emi_amount_collected, 
+        ls_emi_payment_date,
+        ls_emi_payment_date AS ls_payment_date, 
+        referred_to_field, 
+        dpd_bucket, 
+        emi_cycles, 
+        field_executive, 
+        cal_date as calendar_date
+    FROM 
+        ls_calendar_data_old
+    UNION ALL
+    SELECT 
+        collection_lead_id, 
+        lender_name, 
+        current_emi_amount, 
+        zonal_manager, 
+        field_manager, 
+        emi_amount_collected, 
+        ls_emi_payment_date AS ls_payment_date, 
+        ls_emi_payment_date,
+        referred_to_field, 
+        dpd_bucket, 
+        emi_cycles, 
+        field_executive, 
+        cal_date as calendar_date
+    FROM 
+        ls_calendar_data
+    ) AS LCD
+    WHERE 
+        zonal_manager IS NOT NULL
+),
+FIELD_DATA AS (
+    SELECT
+        collection_lead_id,
+        visited_date::date,
+        MAX(field_executive) AS field_executive_visited,
+        MAX(CASE WHEN record_per_day = 1 AND disposition = 'PTP' THEN follow_up_date::date ELSE NULL END) AS follow_up_date,
+        COUNT(*) AS visit_count,
+        SUM(CASE WHEN record_per_day = 1 AND disposition = 'Abandoned' THEN 1 ELSE 0 END) AS Abandoned_cnt,
+        SUM(CASE WHEN record_per_day = 1 AND disposition = 'PTP' THEN 1 ELSE 0 END) AS PTP_count,
+        SUM(CASE WHEN record_per_day = 1 AND disposition = 'Shifted' THEN 1 ELSE 0 END) AS Shifted_cnt,
+        SUM(CASE WHEN record_per_day = 1 AND disposition = 'Paid' THEN 1 ELSE 0 END) AS Paid_cnt,
+        SUM(CASE WHEN record_per_day = 1 AND disposition = 'Left Message' THEN 1 ELSE 0 END) AS Left_Message_cnt,
+        SUM(CASE WHEN record_per_day = 1 AND disposition = 'Raised a Query' THEN 1 ELSE 0 END) AS Raised_a_Query_cnt,
+        SUM(CASE WHEN record_per_day = 1 AND disposition = 'Refused to Pay' THEN 1 ELSE 0 END) AS Refused_to_Pay_cnt,
+        SUM(CASE WHEN record_per_day = 1 AND disposition = 'Door Locked' THEN 1 ELSE 0 END) AS Door_Locked_cnt
+    FROM (
+        SELECT 
+            collection_lead_id, 
+            field_executive, 
+            disposition, 
+            visited_date::date, 
+            follow_up_date::date, 
+            ROW_NUMBER() OVER(PARTITION BY collection_lead_id, visited_date::date ORDER BY visited_date::timestamp DESC) as record_per_day
+        FROM 
+            raw.collections_ls_activity 
+    ) AS FVD
+    GROUP BY
+        collection_lead_id, visited_date::date
+),
+PAYMENT_DATA AS (
+    SELECT 
+        collection_lead_id,
+        payment_date::date AS lms_payment_date,
+        SUM(total_amount) AS lms_payment_amount,
+        COUNT(payment_date) AS lms_payment_cnt 
+    FROM (
+        SELECT 
+            collection_lead_id, 
+            total_amount, 
+            payment_date::date
+        FROM 
+            raw.payments_paymenttransactions where is_deleted = 0
+    ) AS OPD
+    GROUP BY 
+        collection_lead_id,
+        payment_date::date
+),
+TRANSFORMED_DATA AS (
+    SELECT DISTINCT
+        ls.calendar_date::date,
+        ls.collection_lead_id,
+        ls.calendar_year_month,
+        ls.calendar_month,
+        ls.calendar_day,
+        ls.zonal_manager,
+        ls.field_manager,
+        ls.field_executive,
+        ls.emi_cycles,
+        ls.current_emi_amount,
+        ls.dpd_bucket,
+        ls.referred_to_field,
+        ls.lender_name,
+        FIRST_VALUE(ls.dpd_bucket) OVER(PARTITION BY ls.collection_lead_id ORDER BY ls.calendar_date ASC RANGE BETWEEN '1 MONTH' PRECEDING AND '1 MONTH' PRECEDING) AS last_month_dpd_bucket,
+        CASE 
+            WHEN UPPER(ls.lender_name) IN ('APOLLO', 'FAIRCENT', 'ILOAN', 'LOANTAP') THEN greatest(ls.ls_payment_date::date,pd.lms_payment_date::date)
+            ELSE pd.lms_payment_date::date
+        END as payment_date,
+        CASE 
+            WHEN UPPER(ls.lender_name) IN ('APOLLO', 'FAIRCENT', 'ILOAN', 'LOANTAP') THEN MAX(greatest(ls.ls_payment_date::date,pd.lms_payment_date::date)) OVER(PARTITION BY ls.collection_lead_id, DATE_TRUNC('month', ls.calendar_date::date) ORDER BY ls.calendar_date::date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+            ELSE MAX(pd.lms_payment_date::date) OVER(PARTITION BY ls.collection_lead_id, DATE_TRUNC('month', ls.calendar_date::date) ORDER BY ls.calendar_date::date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+        END as cumulative_payment_date,
+        CASE 
+            WHEN UPPER(ls.lender_name) IN ('APOLLO', 'FAIRCENT', 'ILOAN', 'LOANTAP') and (ls.ls_payment_date::date > pd.lms_payment_date::date) THEN pd.lms_payment_amount
+            ELSE pd.lms_payment_amount
+        END AS payment_amount,
+        CASE 
+            WHEN UPPER(ls.lender_name) IN ('APOLLO', 'FAIRCENT', 'ILOAN', 'LOANTAP') and (ls.ls_payment_date::date > pd.lms_payment_date::date) THEN SUM(pd.lms_payment_amount) OVER(PARTITION BY ls.collection_lead_id, DATE_TRUNC('month', ls.calendar_date::date) ORDER BY ls.calendar_date::date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+            ELSE SUM(pd.lms_payment_amount) OVER(PARTITION BY ls.collection_lead_id, DATE_TRUNC('month', ls.calendar_date::date) ORDER BY ls.calendar_date::date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+        END as cumulative_payment_amount,
+        fd.visited_date::date,
+        MAX(fd.visited_date::date) OVER(PARTITION BY ls.collection_lead_id, DATE_TRUNC('month', ls.calendar_date::date) ORDER BY ls.calendar_date::date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) cumulative_visited_date,
+        fd.visit_count,
+        SUM(fd.visit_count)  OVER(PARTITION BY ls.collection_lead_id, DATE_TRUNC('month', ls.calendar_date::date) ORDER BY ls.calendar_date::date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) cumulative_visit_count,
+        fd.ptp_count,
+        SUM(fd.ptp_count)  OVER(PARTITION BY ls.collection_lead_id, DATE_TRUNC('month', ls.calendar_date::date) ORDER BY ls.calendar_date::date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) cumulative_ptp_count,
+        CASE WHEN fd.ptp_count = 0 THEN NULL ELSE fd.follow_up_date::date END ptp_date
+    FROM LS_DATA as ls
+    LEFT JOIN PAYMENT_DATA AS pd
+    ON ls.collection_lead_id = pd.collection_lead_id and ls.calendar_date::date = pd.lms_payment_date::date
+    LEFT JOIN FIELD_DATA AS fd
+    ON ls.collection_lead_id = fd.collection_lead_id and ls.calendar_date::date = fd.visited_date::date
+) ,
+RETRANSFORMED_DATA AS (
+    SELECT
+        TD.calendar_date::date,
+        TD.collection_lead_id,
+        TD.calendar_year_month,
+        TD.calendar_month,
+        TD.calendar_day,
+        TD.zonal_manager,
+        TD.field_manager,
+        TD.field_executive,
+        TD.emi_cycles,
+        TD.current_emi_amount,
+        TD.dpd_bucket,
+        TD.last_month_dpd_bucket,
+        TD.referred_to_field,
+        TD.lender_name,
+        CASE WHEN TD.cumulative_payment_amount >= 0.90 * TD.current_emi_amount AND TD.calendar_date::date = TD.cumulative_payment_date::date THEN 1 ELSE 0 END AS resolution_payment,
+        TD.payment_amount,
+        CASE WHEN TD.cumulative_payment_amount >= 0.90 * TD.current_emi_amount THEN 1 ELSE 0 END AS cumulative_resolution,
+        TD.cumulative_payment_amount,
+        CASE WHEN TD.cumulative_payment_amount >= 0.90 * TD.current_emi_amount AND TD.calendar_date::date = TD.cumulative_payment_date::date THEN TD.cumulative_payment_date ELSE NULL END AS resolution_payment_date,
+        CASE WHEN TD.cumulative_payment_amount >= 0.90 * TD.current_emi_amount THEN TD.cumulative_payment_date ELSE NULL END AS cumulative_resolution_payment_date,
+        FIRST_VALUE(CASE WHEN TD.cumulative_payment_amount >= 0.90 * TD.current_emi_amount AND TD.calendar_date::date = TD.cumulative_payment_date::date THEN TD.cumulative_payment_date ELSE NULL END) OVER(PARTITION BY TD.collection_lead_id ORDER BY TD.calendar_date ASC RANGE BETWEEN '1 MONTH' PRECEDING AND '1 MONTH' PRECEDING) AS last_month_resolution_payment_date,
+        FIRST_VALUE(CASE WHEN TD.cumulative_payment_amount >= 0.90 * TD.current_emi_amount THEN 1 ELSE 0 END) OVER(PARTITION BY TD.collection_lead_id ORDER BY TD.calendar_date ASC RANGE BETWEEN '1 MONTH' PRECEDING AND '1 MONTH' PRECEDING) AS last_month_cumulative_resolution,
+        FIRST_VALUE(CASE WHEN TD.cumulative_payment_amount >= 0.90 * TD.current_emi_amount THEN TD.cumulative_payment_date ELSE NULL END) OVER(PARTITION BY TD.collection_lead_id ORDER BY TD.calendar_date ASC RANGE BETWEEN '1 MONTH' PRECEDING AND '1 MONTH' PRECEDING) AS last_month_cumulative_resolution_payment_date,
+        CASE WHEN TD.ptp_count > 0 THEN 1 ELSE 0 END AS ptp,
+        TD.ptp_date,
+        MAX(CASE WHEN TD.ptp_count = 0 THEN NULL ELSE TD.ptp_date END) OVER(PARTITION BY TD.collection_lead_id, DATE_TRUNC('month', TD.calendar_date::date), TD.cumulative_ptp_count ORDER BY TD.calendar_date::date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) cumulative_ptp_date,
+        TD.ptp_count,
+        TD.cumulative_ptp_count,
+        TD.visit_count,
+        TD.cumulative_payment_date,
+        TD.cumulative_visit_count,
+        FIRST_VALUE(TD.cumulative_ptp_count) OVER(PARTITION BY TD.collection_lead_id ORDER BY TD.calendar_date ASC RANGE BETWEEN '1 MONTH' PRECEDING AND '1 MONTH' PRECEDING) AS last_month_cumulative_ptp_count,
+        FIRST_VALUE(TD.cumulative_visit_count) OVER(PARTITION BY TD.collection_lead_id ORDER BY TD.calendar_date ASC RANGE BETWEEN '1 MONTH' PRECEDING AND '1 MONTH' PRECEDING) AS last_month_cumulative_visit_count,
+        DENSE_RANK() OVER (ORDER BY calendar_year_month desc) AS rank_in_month
+    FROM TRANSFORMED_DATA AS TD
+)SELECT
+    RTD.calendar_date::date,
+    RTD.collection_lead_id,
+    RTD.calendar_year_month,
+    RTD.calendar_month,
+    RTD.calendar_day,
+    CASE
+    WHEN RTD.calendar_date::date = MAX(RTD.calendar_date::date) OVER() THEN 1
+    WHEN EXTRACT(DAY FROM RTD.calendar_date::date) = EXTRACT(DAY FROM (DATE_TRUNC('month', RTD.calendar_date::date) + INTERVAL '1 MONTH' - INTERVAL '1 DAY')) THEN 1
+    ELSE 0 END AS latest_day_of_month,
+    RTD.zonal_manager,
+    RTD.field_manager,
+    RTD.field_executive,
+    substring(RTD.field_executive FROM '^[0-9]+') as field_executive_emp_id,
+    RTD.emi_cycles,
+    RTD.current_emi_amount,
+    RTD.dpd_bucket,
+    RTD.referred_to_field,
+    RTD.rank_in_month,
+    ls.first_name  ,
+    CASE
+    WHEN UPPER(RTD.referred_to_field) in ( 'TRUE','YES') THEN '(1) Referral'
+    ELSE RTD.dpd_bucket END AS referral_dpd_bucket,
+    CASE
+    WHEN UPPER(RTD.referred_to_field) in ( 'TRUE','YES') THEN '(1) Referral'
+    WHEN RTD.dpd_bucket IN ('(1) 0', '(2) 0-30', '(3) 31-60', '(4) 61-90') THEN '(2) 0-90'
+    WHEN RTD.dpd_bucket IN ('(5) 91-120', '(6) 121-150', '(7) 151-180', '(8+) 180+') THEN '(3) 90+'
+    ELSE NULL END AS referral_dpd_bucket_90,
+    CASE
+    WHEN UPPER(RTD.referred_to_field) in ( 'TRUE','YES') THEN '(1) Referral'
+    WHEN RTD.dpd_bucket IN ('(1) 0') THEN '(1) 0'
+    WHEN RTD.dpd_bucket IN ('(2) 0-30') THEN '(2) 0-30'
+    WHEN RTD.dpd_bucket IN ('(3) 31-60') THEN '(3) 31-60'
+    WHEN RTD.dpd_bucket IN ('(4) 61-90') THEN '(4) 61-90'
+    WHEN RTD.dpd_bucket IN ('(5) 91-120', '(6) 121-150', '(7) 151-180', '(8+) 180+') THEN '90+'
+    ELSE NULL END AS referral_dpd_bucket_with_90,
+    CASE
+        WHEN cumulative_visit_count <= 0 or cumulative_visit_count is null THEN '0_visit'
+        WHEN cumulative_visit_count = 1 THEN '1_visit'
+        WHEN cumulative_visit_count = 2 THEN '2_visit'
+        WHEN cumulative_visit_count = 3 THEN '3_visit'
+        WHEN cumulative_visit_count = 4 THEN '4_visit'
+        WHEN cumulative_visit_count = 5 THEN '5_visits'
+        WHEN cumulative_visit_count >= 6 THEN '6+_visits'
+        ELSE NULL
+    END AS visits_bucket,
+    CASE 
+        WHEN COALESCE(MAX(RTD.last_month_cumulative_resolution) OVER(PARTITION BY RTD.collection_lead_id, DATE_TRUNC('month', RTD.calendar_date)), 0) = 0 THEN
+            CASE
+                WHEN UPPER(dpd_bucket) IN ('TRUE', 'YES') THEN 'Referred'
+                WHEN dpd_bucket IN ('(1) 0,(2) 0-30') THEN 'Flow 1-30'
+                WHEN dpd_bucket IN ('(3) 31-60', '(4) 61-90') THEN 'Flow 31-90'
+                WHEN dpd_bucket IN ('(5) 91-120', '(6) 121-150', '(7) 151-180', '(8+) 180+') THEN '91-120'
+                ELSE 'Referred'
+            END
+        WHEN MAX(RTD.last_month_cumulative_resolution) OVER(PARTITION BY RTD.collection_lead_id, DATE_TRUNC('month', RTD.calendar_date)) > 0 THEN
+            CASE
+                WHEN UPPER(dpd_bucket) IN ('TRUE', 'YES') THEN 'Referred'
+                WHEN dpd_bucket IN ('(1) 0,(2) 0-30') THEN 'Stab 1-30'
+                WHEN dpd_bucket IN ('(3) 31-60', '(4) 61-90') THEN 'Stab 31-90'
+                WHEN dpd_bucket IN ('(5) 91-120', '(6) 121-150', '(7) 151-180', '(8+) 180+') THEN '91-120'
+                ELSE 'Referred'
+            END
+        ELSE 'Referred'
+    END AS stab_flow_bucket,
+    RTD.lender_name,
+    CASE WHEN RTD.calendar_date::date = MIN(RTD.resolution_payment_date) OVER(PARTITION BY RTD.collection_lead_id, RTD.calendar_year_month) THEN 1 ELSE 0 END as resolution,
+    RTD.payment_amount,
+    CASE WHEN RTD.calendar_date::date = MIN(RTD.resolution_payment_date) OVER(PARTITION BY RTD.collection_lead_id, RTD.calendar_year_month) THEN MIN(RTD.resolution_payment_date) OVER(PARTITION BY RTD.collection_lead_id, RTD.calendar_year_month) ELSE NULL END as resolution_date,
+    RTD.resolution_payment_date,
+    CASE WHEN RTD.cumulative_resolution IS NULL THEN 0 ELSE RTD.cumulative_resolution END AS cumulative_resolution,
+    RTD.cumulative_payment_amount,
+    RTD.cumulative_resolution_payment_date,
+    CASE WHEN RTD.cumulative_resolution_payment_date IS NOT NULL THEN MIN(RTD.resolution_payment_date) OVER(PARTITION BY RTD.collection_lead_id, RTD.calendar_year_month) ELSE NULL END AS cumulative_resolution_date,
+    RTD.last_month_cumulative_resolution,
+    CASE WHEN RTD.last_month_cumulative_resolution_payment_date IS NOT NULL THEN MIN(RTD.last_month_resolution_payment_date) OVER(PARTITION BY RTD.collection_lead_id, RTD.calendar_year_month) ELSE NULL END AS last_month_cumulative_resolution_date,
+    CASE WHEN RTD.ptp IS NULL THEN 0 ELSE RTD.ptp END AS ptp,
+    RTD.ptp_date,
+    LAG(RTD.cumulative_ptp_date, 1) OVER(PARTITION BY RTD.collection_lead_id, RTD.calendar_year_month ORDER BY RTD.calendar_date ASC) AS previous_ptp_date,
+    RTD.cumulative_ptp_date,
+    CASE WHEN RTD.ptp_count IS NULL THEN 0 ELSE RTD.ptp_count END ptp_count,
+    CASE WHEN RTD.cumulative_ptp_count IS NULL THEN 0 ELSE RTD.cumulative_ptp_count END cumulative_ptp_count,
+    CASE WHEN RTD.visit_count IS NULL THEN 0 ELSE RTD.visit_count END visit_count,
+    CASE WHEN RTD.cumulative_visit_count IS NULL THEN 0 ELSE RTD.cumulative_visit_count END cumulative_visit_count,
+    RTD.last_month_cumulative_ptp_count,
+    RTD.last_month_cumulative_visit_count,
+    CURRENT_TIMESTAMP AS row_modified_at
+FROM RETRANSFORMED_DATA AS RTD
+left join raw.collections_ls_data_v2ls on ls.mx_collection_lead_id = rtd.collection_lead_id
+);
+
+
+-------------------------------------------------------------------------------
+
+
+
+
+
+
