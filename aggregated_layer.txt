@@ -1,0 +1,67 @@
+TRUNCATE TABLE  aggregated.agent_date_level_field_collection_data;
+INSERT INTO aggregated.agent_date_level_field_collection_data (
+
+drop table aggregated.agent_date_level_field_collection_data;
+
+
+CREATE TABLE aggregated.agent_date_level_field_collection_data AS (
+ SELECT
+        TD.calendar_date::date,
+        TD.calendar_year_month,
+        TD.calendar_month,
+        TD.calendar_day,
+        TD.latest_day_of_month,
+        TD.zonal_manager,
+        TD.field_manager,
+        TD.field_executive,
+        TD.referral_dpd_bucket,
+        TD.referral_dpd_bucket_90,
+        TD.referral_dpd_bucket_with_90, 
+        TD.visits_bucket,
+        TD.stab_flow_bucket,
+        TD.rank_in_month,
+        TD.cumulative_visit_count,
+        TT."Daily Resolution",
+        TT."Possible Resolution",
+        TT."Visits per Day",
+        COUNT(DISTINCT TD.collection_lead_id) AS stock_count,
+        SUM(TD.cumulative_resolution) AS resolution_count,
+        SUM(CASE WHEN TD.cumulative_resolution = 0 THEN 1 ELSE 0 END) AS unpaid_count,
+        SUM(CASE WHEN TD.cumulative_resolution = 0 AND TD.cumulative_visit_count = 0 THEN 1 ELSE 0 END) AS unpaid_not_visited_count,
+        SUM(CASE WHEN TD.cumulative_resolution = 0 AND TD.cumulative_visit_count > 0 THEN 1 ELSE 0 END) AS unpaid_visited_count,  
+        SUM(CASE WHEN TD.cumulative_ptp_date BETWEEN TD.calendar_date AND (DATE_TRUNC('month', TD.calendar_date) + INTERVAL '1 MONTH' - INTERVAL '1 DAY') THEN 1 ELSE 0 END) AS ptp_today_onwards_unpaid_count,
+        SUM(CASE WHEN TD.cumulative_ptp_date BETWEEN TD.calendar_date AND LEAST(TD.calendar_date + INTERVAL '2 DAY', (DATE_TRUNC('month', TD.calendar_date) + INTERVAL '1 MONTH' - INTERVAL '1 DAY')) THEN 1 ELSE 0 END) AS ptp_next_two_days_unpaid_count,
+        SUM(CASE WHEN TD.cumulative_ptp_date BETWEEN TD.calendar_date AND LEAST(TD.calendar_date + INTERVAL '3 DAY', (DATE_TRUNC('month', TD.calendar_date) + INTERVAL '1 MONTH' - INTERVAL '1 DAY')) THEN 1 ELSE 0 END) AS ptp_next_three_days_unpaid_count,
+        SUM(CASE WHEN TD.cumulative_ptp_date BETWEEN TD.calendar_date AND LEAST(TD.calendar_date + INTERVAL '4 DAY', (DATE_TRUNC('month', TD.calendar_date) + INTERVAL '1 MONTH' - INTERVAL '1 DAY')) THEN 1 ELSE 0 END) AS ptp_next_four_days_unpaid_count,
+        SUM(CASE WHEN TD.cumulative_ptp_date BETWEEN TD.calendar_date AND LEAST(TD.calendar_date + INTERVAL '5 DAY', (DATE_TRUNC('month', TD.calendar_date) + INTERVAL '1 MONTH' - INTERVAL '1 DAY')) THEN 1 ELSE 0 END) AS ptp_next_five_days_unpaid_count,
+        SUM(CASE WHEN TD.cumulative_ptp_date BETWEEN TD.calendar_date AND LEAST(TD.calendar_date + INTERVAL '6 DAY', (DATE_TRUNC('month', TD.calendar_date) + INTERVAL '1 MONTH' - INTERVAL '1 DAY')) THEN 1 ELSE 0 END) AS ptp_next_six_days_unpaid_count,
+        SUM(CASE WHEN TD.cumulative_ptp_date <= TD.calendar_date AND TD.cumulative_resolution_date <= TD.cumulative_ptp_date THEN 1 ELSE 0 END) AS promise_kept_count,
+        SUM(CASE WHEN TD.cumulative_ptp_date <= TD.calendar_date THEN 1 ELSE 0 END) AS ptp_till_date_count,
+        SUM(TD.visit_count) AS visit_count,
+        SUM(CASE WHEN TD.visit_count > 0 THEN 1 ELSE 0 END) AS unique_visit_count,
+        SUM(CASE WHEN TD.visit_count > 0 AND TD.ptp_count > 0 AND TD.cumulative_resolution = 0 THEN 1 ELSE 0 END) AS unique_visit_with_ptp_unpaid_count,
+        SUM(CASE WHEN TD.visit_count > 0 AND TD.resolution = 1 THEN 1 ELSE 0 END) AS unique_visit_with_payment_count,
+        SUM(CASE WHEN TD.visit_count > 0 AND TD.cumulative_resolution_date < TD.calendar_date THEN 1 ELSE 0 END) AS unique_visit_already_paid_count,
+        SUM(CASE WHEN TD.visit_count > 0 THEN 1 ELSE 0 END)
+        - (
+            SUM(CASE WHEN TD.visit_count > 0 AND TD.ptp_count > 0 AND TD.cumulative_resolution = 0 THEN 1 ELSE 0 END)
+            + SUM(CASE WHEN TD.visit_count > 0 AND TD.resolution = 1 THEN 1 ELSE 0 END)
+            + SUM(CASE WHEN TD.visit_count > 0 AND TD.cumulative_resolution_date < TD.calendar_date THEN 1 ELSE 0 END)
+        ) AS remaining_unique_visit_count,
+        SUM(CASE WHEN TD.previous_ptp_date = TD.calendar_date THEN 1 ELSE 0 END) AS ptp_for_the_day_old_visit_count,
+        SUM(TD.resolution) AS payment_count,
+        SUM(CASE WHEN TD.resolution = 1 AND TD.visit_count = 0 THEN 1 ELSE 0 END) AS payment_without_visit_count,
+        SUM(CASE WHEN TD.resolution = 1 AND TD.cumulative_ptp_date >= TD.calendar_date THEN 1 ELSE 0 END) AS payment_from_earlier_visit_and_ptp_till_now_count,
+        SUM(CASE WHEN TD.resolution = 1 AND TD.cumulative_ptp_date < TD.calendar_date THEN 1 ELSE 0 END) AS broken_ptp_but_paid_today_count,
+        SUM(CASE WHEN TD.last_month_cumulative_resolution = 1 THEN 1 ELSE 0 END) AS last_month_paid_count,
+        SUM(CASE WHEN TD.last_month_cumulative_resolution = 1 AND TD.cumulative_resolution = 1 THEN 1 ELSE 0 END) AS last_month_paid_this_month_unpaid_count,
+        CURRENT_TIMESTAMP AS row_modified_at
+    FROM pre_aggregated.lead_date_level_field_collection_data TD
+    LEFT JOIN raw.target TT ON field_executive_emp_id = CAST(TT."EMP_ID" AS VARCHAR) AND TD.stab_flow_bucket = TT."Status_Main" AND TD.calendar_date=CAST(TT."Date" AS DATE)
+    GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,17,18
+);
+
+
+
+
+
